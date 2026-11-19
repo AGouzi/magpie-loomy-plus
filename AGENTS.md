@@ -1,0 +1,138 @@
+# AGENTS.md —— 给 AI 执行者的入口
+
+> 人类请看 [README](./README.md)。这份只回答两件事：**你现在该读哪一份**、
+> **忘了哪一条会静默出错**。
+>
+> 结构照搬 [magpie-plugin-scaffold](../magpie-plugin-scaffold/AGENTS.md)；
+> 第二节是本仓库自己的坑，来自 `docs/internals.md` 的实测记录。
+
+---
+
+## 零、magpie 升级时：只看稳定版
+
+**判断「要不要跟着 magpie 改这个插件」看稳定渠道，不看每版本渠道。**
+magpie 设置里有「更新渠道：每个版本 / 稳定版」，用户默认跑后者，插件要跟的也是后者。
+
+```bash
+curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[^"]*"'
+```
+
+实测（2026-10-28）：两档差 **400 多个版本**（每版本 0.1.1763 / 稳定版 0.1.1327），
+但把两边内嵌契约都提取出来逐字段比对后 —— **插件相关的字段一条不差**。
+多出来的段是 GUI 历史，不是插件契约。⇒ 追每版本几乎全是白跑。
+
+**稳定版版本号变了**，才需要重提取契约（脚手架的 `extract-contract.py`）→
+跑 `contract-diff.mjs` → 看差集里有没有「不写会关掉某个能力」的字段。
+完整判据见脚手架的
+[HOOKS.md](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/HOOKS.md) 顶部
+与 [UPDATING.md](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/UPDATING.md) 第七节。
+
+---
+
+## 一、先定位你在哪一步
+
+| 你在做什么 | 必读（按顺序） | 做完的判据 |
+|---|---|---|
+| **第一次碰这个仓库**（想知道它为什么存在） | [docs/internals.md](./docs/internals.md) 的「这个插件修的是什么」 | 能说清 `used` 不上报会怎样（空号排队首） |
+| **改额度 / `usage` 上报** | internals 的「这个插件修的是什么」+ HOOKS 九 | 今日池参与路由、永久池 `aside`、两池皆空有 `used:100` |
+| **改签到** | internals 的「协议要点」签到那几行 | `outcome` 在契约六个合法值里 |
+| **改积分 / 邀请 / 激活** | internals 的「协议要点」「一个账号的永久积分上限」 | 数值与实测账对得上（双方各 5000、上限 25,000） |
+| **改登录 / 刷新** | internals 的「登录方式」 | 刷新有节流，不是每次都打 |
+| **代码写完，准备交付** | [CHECKLIST.md](./CHECKLIST.md) 的 **A 表** | A 表全勾 + check 脚本退出 0 |
+| **要发版本** | [UPDATING.md](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/UPDATING.md)（七步） | CHECKLIST B 表全勾 + 四条验证 |
+
+**最容易漏的是最后一行。** 禁止直接推 main；只能推功能分支，PR 的 `rules` 全绿并合并后才发布。
+
+---
+
+## 二、本仓库的坑
+
+| # | 症状（出问题时你看到什么） | 判据 | 出处 |
+|---|---|---|---|
+| 1 | 额度条正常，但**被用空的号反而最先被派活** | `usage` 必须上报 `used`。magpie 归一化时 `Math.max(0, num(w?.used))` —— 不给就是 0 = 满额 = 排队首。这是本仓库存在的理由 | internals 这个插件修的是什么 |
+| 2 | 账号被误判「花完了」/ 或永远不被判花完 | **今日池**参与路由（`used`/`amount`/`limit`/`resetsAt` 齐全）；**永久池**恒 `aside: true` 只给 display | internals 同上 |
+| 3 | 两池都空的号仍然排在最前面 | 必须**合成一条 `used: 100` 的参与路由窗口**把它压到底；不画窗口 = 继续以 0% 排第一 | internals 同上 |
+| 4 | 界面上额度占比是编的 | 今日上限未知时 → `aside` + `used: 0`，显示「N 积分剩余（今日上限未知）」。宁可降级也不谎报占比 | internals 同上 |
+| 5 | 签到界面出现「签到失败 · 每日赠送积分已刷新」这种自相矛盾的行 | `outcome` 必须是契约六值之一（`claimed`/`done`/`ineligible`/`inactive`/`captcha`/`failed`）。返回 `"success"` 会被归为 failed **但保留 message** | internals 同上 |
+| 6 | 额度读数慢、拖慢整张卡片 | 热路径用 `/api/v1/points/balance` —— 它只回 3 个数字，实测 61~233ms，是三家现有插件都没用的最小端点 | internals 协议要点 |
+| 7 | 「今天已领」被显示成「刚领到」 | `POST /points/first-login` 幂等，判据是 `alreadyProcessed`；「今天已领」必须是 `done`，不是 `claimed` | internals 协议要点 |
+| 8 | 频繁刷新把上游打烦 / 触发限流 | token 刷新要**节流**，不能每次都打 | internals 协议要点 |
+| 9 | 邀请奖励的数字对不上 | 实测邀请双方**各得 5000**，不是 2000 | internals 协议要点 |
+| 10 | 拿别的账号的凭据去请求，串号 | `getAuth()` 只在当前账号作用域（magpie 的 `inScope`）可见，拿不到别的账号 | internals 协议要点 |
+| 11 | 以为能给「锁定永久积分」加个开关 | 不需要 —— 永久池恒 `aside`，magpie 只在其它号都不可用时才用它，已经是「优先别烧永久积分」 | internals 已知取舍 |
+| 12 | `magpie plugin add xxx.tgz` 装不上 | 它把 tgz 当 JS 模块 `import()`；本地包走 `plugins.json` + `plugins/package.json` 登记 | internals 从本地 tgz 安装 |
+| 13 | 改了代码重装，行为没变 | 同版本号重打包命中 bun 缓存 —— 必须 bump `version`；另外「装完要不要重启」实测**不必需**，但触发机制未查明 | internals 从本地 tgz 安装 |
+| 14 | npm 上装到了别人的包 | 本仓库 **npm 包名 ≠ 仓库名**：npm 是 `magpie-plugin-loomy-plus`，仓库是 `magpie-loomy-plus`。未发布 npm 时只能从 GitHub 或本地 tgz 安装 | internals 从本地 tgz 安装 |
+| 15 | 卡片标题 / 源码按钮不对 | `registry-entry.json` 的 `package` 必须与 **npm 包名**（`publish-npm.mjs` 的 `PUBLISH_AS`）一字不差；`name` 才是市场显示名（`<中文> <English>`）；插件不写 magpie 的市场缓存 | internals 从本地 tgz 安装 |
+| 16 | 长对话里某个号回 `400 内容太长了，请精简输入或开启新对话`，**整轮会话直接失败**，组里其它号一次没被问 | magpie 的 `tooLongRe`（`internal/gateway/gateway.go:7484`）中文只认 `上下文(长度)?(超\|过长)` 与 `超(过\|出)(了)?(模型)?(的)?(最大)?上下文` —— 这条文案一个「上下文」都没有 ⇒ `overflowed()` 为假 ⇒ 不换号、不 rest，把 400 摔给客户端。本插件在 `chatFetch` 里改写成 `上下文超出长度限制`（只换文案，状态码与其余字段原样）。**根因在别处**：`yetone/magpie#3654` —— 同一个模型在组内/组外报的 `contextWindow` 不同，agent 看见数字变了就把整个历史重新组装一次，一次请求带两份历史（实测 msgs 558→1175、字符 6.4×）。判据：`node tests/too-long.test.mjs` | CHANGELOG 0.1.19 · `src/chat.mjs` · magpie#3654 |
+| 17 | **上游偶发或固定回 403 `TM.00000001`（文案是「网络繁忙，请稍后重试」），重试和换账号都没用**；或者某个 provider 换到新网络 / 新账号后就不通 | 每个打上游的 `fetch` 都**显式**带 `User-Agent`，值是**该服务官方客户端**的 UA —— 绝不写 `<包名>/<版本号>`，也绝不让宿主的 `magpie/<version>` 透传（插件不设 UA 时它就这么上去）。官方是网页就用完整 Chrome UA；有 App / CLI 客户端就用那个客户端的 UA。判据：`node scripts/check-ua.mjs` 退出 0（模板坑表第 38 条） | README「3. User-Agent 常常是硬校验」· `scripts/check-ua.mjs` |
+| 18 | **选的是 1017，实际却可能落到更旧的 `0731` 快照**（界面、组名、请求日志都写着 1017，真正服务的却是别的版本） | 可选目录里 DeepSeek **只有 dated** `deepseek-v4-flash-1017`、没有裸名 `DeepSeek-V4.1-Flash`；`magpie model wire loomy/<模型>` 回出来的也是 dated。路由组名与 `modelSameAs` 只是统计别名，**不是快照锁**（实测有组内成员把 1017 的请求服务成 `0731`，`served_model` 对不上） | `src/models.mjs` · 2026-11-15 路由调查 |
+| 19 | **聊天请求首字几十秒、`504 延迟未开始`、偶发 `503 该模型服务暂时不可用`**；抓包看请求「什么错都没有，就是很慢」 | 官方客户端 0.9.39 对 `/chat/completions` 必带 `traceparent`（W3C `00-<32hex>-<16hex>-01`）+ `ChatId`/`MsgId`/`TurnId`/`InvokeOrigin`/`X-Loomy-Request-Purpose`/`loomy-version`，官方源码注释写明**缺 traceparent 会挂死**。判据：`node --test tests/chat-tracing.test.mjs` 全绿，且真实请求带 `loomy-version` 头。⚠ 补头是协议对齐，**不会让上游拥塞变快** —— 2026-11-18 的 503 是 1017 后端容量问题（同时段 GLM 26s、MiniMax 15s，只有 1017 要 12~144s） | `src/tracing.mjs` · internals「聊天请求的协议面」 |
+| 20 | 卡片、额度、签到看起来正常但宿主日志说钩子参数不对 | 宿主固定调用 `models(provider,{auth})`、`usage(getAuth,provider)`、`checkin(getAuth,provider)`；改成别的签名会静默拿到空 session。判据：`node --test tests/host-contract.test.mjs` | `index.mjs` · 宿主 `host-*.js` 的 models / usage / checkin 调用点 |
+| 21 | 同一账号一刷新卡片就同时打多份余额 / 模型请求 | 必须让 usage、models、checkin 共享 SingleFlight；缓存必须有 TTL 与容量上限。判据：并发测试里上游调用次数为 1 | `src/singleflight.mjs` · `src/usage.mjs` · `index.mjs` |
+| 22 | 风控后 Magpie 重启又继续猛打账号 | 风控冷却必须落盘；只存账号哈希，不存 session。判据：重启后 `RiskCircuit.get()` 仍返回剩余时间 | `src/resilience.mjs` · `tests/host-contract.test.mjs` |
+
+---
+
+## 三、命令
+
+```bash
+# 合规检查（脚手架里的脚本，指到本仓库）
+node ../magpie-plugin-scaffold/scripts/check.mjs .
+
+# 语义测试（usage / 签到 outcome 那几条规则在这儿锁着）
+node tests/semantics.test.mjs
+
+# 打包面预演
+npm pack --dry-run
+
+# 发布（包内 name 是 ASCII slug magpie-plugin-loomy-plus；显示名在 magpie.name）
+npm run publish:npm
+
+# Release：本仓库有 release.yml，推 tag 后 workflow 自动建（不用手工 POST）
+git tag v0.1.16 && git push origin v0.1.16
+#   （workflow 会自动建 Release；约 1 分钟后查 /releases/tags/v<version>）
+```
+
+---
+
+## 四、两个交付门
+
+**门 1 · 代码交付**
+
+```
+□ node ../magpie-plugin-scaffold/scripts/check.mjs . 退出码 = 0
+□ node tests/semantics.test.mjs 全绿（usage 语义不能靠眼睛看）
+□ CHECKLIST.md 的 A 表全勾
+```
+
+**门 2 · 发布**
+
+```
+□ CHECKLIST.md 的 B 表全勾（七步）
+□ 四条验证：npm view magpie-plugin-loomy-plus version / tarball 内容 /
+            magpie plugin list / Release 在
+```
+
+⚠ 没过门 2 不许说「已发布」。
+
+---
+
+## 五、文档地图
+
+| 文件 | 管什么 | 什么时候读 |
+|---|---|---|
+| [README](./README.md) | 用户门面：功能、模型、签到、安装、常见问题 | 改用户可见行为时 |
+| [docs/internals.md](./docs/internals.md) | 修的是什么、登录、协议要点、测试、已知取舍、永久积分上限 | 改代码前按章查 |
+| [tests/semantics.test.mjs](./tests/semantics.test.mjs) | `usage` 与签到 `outcome` 的语义锁 | 改这两块必跑 |
+| [CHANGELOG.md](./CHANGELOG.md) | 每版一节 | 写新版本时 |
+| [CHECKLIST.md](./CHECKLIST.md) | 两张勾选表 | 两个交付门 |
+| 脚手架 [AGENTS.md](../magpie-plugin-scaffold/AGENTS.md) | 通用坑与 check 能查什么 | 第一次接触这个插件族时 |
+
+---
+
+## 六、这份文件的维护规矩
+
+1. 任何一次「不报错、要几小时才找到」的坑，收工前在第二节加一行（症状 → 判据 → 出处）。
+2. 第二节只放一句话判据，论证留在 `docs/internals.md`。
+3. 判据要能当场验证（命令、字段、界面现象）。

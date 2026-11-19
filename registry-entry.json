@@ -1,0 +1,11 @@
+{
+  "package": "magpie-plugin-loomy-plus",
+  "name": "讯飞 Loomy Plus",
+  "providers": [
+    "loomy"
+  ],
+  "summary": {
+    "en": "Loomy Plus: corrected Magpie host hooks, desktop/SMS/session sign-in, live models, dual credit pools, bounded deduplication, persistent risk cooldown, and gentle per-account pacing.",
+    "zh": "讯飞 Loomy Plus：修正 Magpie 宿主钩子，桌面端 / 短信 / 粘贴 session 登录，双积分池、并发去重、持久风控冷却与同账号请求错峰。"
+  }
+}
